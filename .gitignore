@@ -1,0 +1,25 @@
+# Local environment / secrets
+.env
+.env.*
+!.env.production.example
+
+# Gradle / Android build output
+.gradle/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+captures/
+local.properties
+
+# Local tooling and emulator artifacts
+.tooling/
+.mobile-emulator.log
+*.apk
+*.aab
+
+# IDE / OS noise
+.idea/
+*.iml
+.DS_Store
+*.log
+
