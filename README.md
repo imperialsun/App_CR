@@ -4,11 +4,11 @@ Demeter Speech is the Android client used for recording, transcription, transcri
 
 ## Prerequisites
 
-- JDK 17
-- Android SDK `platforms;android-35`
-- Android Build Tools `35.0.1`
+- A locally installed JDK
+- Android SDK `platforms;android-36`
+- Android Build Tools `36.0.0`
 - CMake `3.22.1`
-- NDK `27.1.12297006`
+- NDK `28.2.13676358`
 
 ## Configuration
 
@@ -52,4 +52,3 @@ The launcher reads optional local defaults from `./.tooling/run-mobile.env` and 
 ## License
 
 GPL-3.0-or-later.
-

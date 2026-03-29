@@ -1,3 +1,9 @@
 <resources>
     <style name="Theme.DemeterSpeech" parent="Theme.Material3.DayNight.NoActionBar" />
+
+    <style name="Theme.DemeterSpeech.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/logo_splash</item>
+        <item name="postSplashScreenTheme">@style/Theme.DemeterSpeech</item>
+    </style>
 </resources>
