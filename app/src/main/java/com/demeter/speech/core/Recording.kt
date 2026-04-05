@@ -471,23 +471,6 @@ object VadChunker {
     }
 }
 
-data class ChunkingConfig(
-    val requestedDurationSec: Int,
-    val effectiveDurationSec: Int,
-    val effectiveOverlapSec: Int,
-)
-
-fun resolveDemeterChunking(requestedDurationSec: Int, requestedOverlapSec: Int): ChunkingConfig {
-    val requestedDuration = if (requestedDurationSec > 0) requestedDurationSec else DEFAULT_DEMETER_CHUNK_DURATION_SEC
-    val effectiveDurationSec = requestedDuration
-    val effectiveOverlapSec = requestedOverlapSec.coerceAtLeast(0).coerceAtMost(maxOf(0, effectiveDurationSec - 1))
-    return ChunkingConfig(
-        requestedDurationSec = requestedDuration,
-        effectiveDurationSec = effectiveDurationSec,
-        effectiveOverlapSec = effectiveOverlapSec,
-    )
-}
-
 interface TranscriptionEngine {
     suspend fun transcribe(
         file: File,
@@ -558,89 +541,17 @@ class DemeterBackendTranscriptionEngine : TranscriptionEngine {
         overlapSec: Int,
         onChunkTranscribed: (String) -> Unit,
     ): String = withContext(Dispatchers.IO) {
-        val config = resolveDemeterChunking(requestedDurationSec = chunkDurationSec, requestedOverlapSec = overlapSec)
-        val chunks = WavChunker.split(file, config.effectiveDurationSec, config.effectiveOverlapSec)
-        try {
-            if (chunks.isEmpty()) {
-                val response = transcribeDemeterWithFallback(
-                    backendClient = backendClient,
-                    file = file,
-                    overlapSec = config.effectiveOverlapSec,
-                )
-                val text = formatTranscriptForDisplay(response.text, response.segments).ifBlank {
-                    "Transcription Demeter Santé vide."
-                }
-                onChunkTranscribed(text)
-                return@withContext text
-            }
-            val texts = mutableListOf<String>()
-            chunks.forEach { chunk ->
-                val response = transcribeDemeterWithFallback(
-                    backendClient = backendClient,
-                    file = chunk,
-                    overlapSec = config.effectiveOverlapSec,
-                )
-                val text = formatTranscriptForDisplay(response.text, response.segments)
-                if (text.isNotBlank()) {
-                    texts.add(text)
-                    onChunkTranscribed(joinChunkedTranscriptDisplay(texts))
-                }
-            }
-            if (texts.isEmpty()) {
-                "Transcription Demeter Santé vide."
-            } else {
-                joinChunkedTranscriptDisplay(texts)
-            }
-        } finally {
-            chunks.forEach { chunk ->
-                runCatching { chunk.delete() }
-            }
-        }
-    }
-
-    private suspend fun transcribeDemeterWithFallback(
-        backendClient: BackendApiClient,
-        file: File,
-        overlapSec: Int,
-    ): DemeterTranscriptionResponseDto {
-        return runCatching {
-            backendClient.transcribeDemeterChunk(
-                DemeterTranscriptionRequest(
-                    file = file,
-                    diarize = true,
-                )
+        val response = backendClient.transcribeDemeterChunk(
+            DemeterTranscriptionRequest(
+                file = file,
+                diarize = true,
             )
-        }.getOrElse { error ->
-            val durationSeconds = WavChunker.estimateDurationSeconds(file)
-            val splitDuration = max(1, durationSeconds / 2)
-            if (splitDuration <= 1) {
-                throw error
-            }
-            val smallerChunks = WavChunker.split(file, chunkDurationSec = splitDuration, overlapSec = overlapSec)
-            if (smallerChunks.size <= 1) {
-                throw error
-            }
-            try {
-                val text = buildString {
-                    smallerChunks.forEach { smaller ->
-                        val response = transcribeDemeterWithFallback(
-                            backendClient = backendClient,
-                            file = smaller,
-                            overlapSec = overlapSec,
-                        )
-                        if (response.text.isNotBlank()) {
-                            if (isNotEmpty()) append('\n')
-                            append(response.text)
-                        }
-                    }
-                }
-                return DemeterTranscriptionResponseDto(text = text)
-            } finally {
-                smallerChunks.forEach { chunk ->
-                    runCatching { chunk.delete() }
-                }
-            }
+        )
+        val text = formatTranscriptForDisplay(response.text, response.segments).ifBlank {
+            "Transcription Demeter Santé vide."
         }
+        onChunkTranscribed(text)
+        text
     }
 }
 

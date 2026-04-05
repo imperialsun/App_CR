@@ -2,11 +2,11 @@ package com.demeter.speech
 
 import android.app.Application
 import android.net.Uri
-import android.util.Log
 import android.util.Patterns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.demeter.speech.core.AppAuthState
+import com.demeter.speech.core.AppLog
 import com.demeter.speech.core.AppPreferences
 import com.demeter.speech.core.AudioImportConverter
 import com.demeter.speech.core.BackendApiClient
@@ -25,6 +25,11 @@ import com.demeter.speech.core.MeetingRecordingState
 import com.demeter.speech.core.MeetingFinalizeOperationInProgressException
 import com.demeter.speech.core.MeetingFinalizeResponseDto
 import com.demeter.speech.core.PendingMeetingFinalizeOperationSnapshot
+import com.demeter.speech.core.SupportErrorReporter
+import com.demeter.speech.core.SupportReportBackendError
+import com.demeter.speech.core.SupportReportBuilder
+import com.demeter.speech.core.SupportReportFile
+import com.demeter.speech.core.SupportReportRetry
 import com.demeter.speech.core.MeetingTranscriptChunkUi
 import com.demeter.speech.core.ReportFormat
 import com.demeter.speech.core.RootTab
@@ -50,12 +55,14 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import org.json.JSONObject
 
 class DemeterSpeechViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as DemeterSpeechApplication
     private val container = app.container
     private val backend: BackendApiClient = container.backendApiClient
     private val prefs: AppPreferences = container.preferences
+    private val supportReporter: SupportErrorReporter = container.supportErrorReporter
     private val localEngine = container.localTranscriptionEngine
     private val demeterEngine = container.demeterTranscriptionEngine
 
@@ -160,9 +167,28 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                         )
                     }
                     resumePendingFinalizeOperationIfAny()
+                    flushPendingSupportReports()
                 }
                 .onFailure { error ->
-                    Log.w(TAG, "Session refresh failed", error)
+                    AppLog.w(TAG, "Session refresh failed", error)
+                    val stateSnapshot = _state.value
+                    viewModelScope.launch(Dispatchers.IO) {
+                        reportSupportIncident(
+                            route = "app://session-refresh",
+                            backendError = SupportReportBackendError(
+                                status = 401,
+                                code = "session_refresh_failed",
+                                message = error.message ?: "Session expirée",
+                                path = "/api/v1/auth/refresh",
+                                method = "POST",
+                            ),
+                            telemetry = JSONObject().apply {
+                                put("authState", authStateAtStart.name)
+                                put("errorClass", error.javaClass.name)
+                            },
+                            stateSnapshot = stateSnapshot,
+                        )
+                    }
                     applySessionExpiredState(error.message ?: "Session expirée")
                 }
         }
@@ -213,6 +239,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                     )
                 }
                 resumePendingFinalizeOperationIfAny()
+                flushPendingSupportReports()
             }.onFailure { error ->
                 _state.update { current ->
                     current.copy(
@@ -791,20 +818,64 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (sessionExpired: BackendSessionExpiredException) {
-                    Log.i(TAG, "Finalize operation session expired: ${snapshot.operationId}", sessionExpired)
+                    AppLog.i(TAG, "Finalize operation session expired: ${snapshot.operationId}", sessionExpired)
+                    reportSupportIncident(
+                        route = "app://meeting/finalize",
+                        backendError = SupportReportBackendError(
+                            status = 401,
+                            code = "session_expired",
+                            message = sessionExpired.message ?: "Session expirée",
+                            path = "/api/v1/meetings/finalize",
+                            method = "POST",
+                        ),
+                        telemetry = JSONObject().apply {
+                            put("operationId", snapshot.operationId)
+                            put("phase", "post_finalize")
+                        },
+                    )
                     applySessionExpiredState(sessionExpired.message ?: "Session expirée")
                     return
                 } catch (inProgress: MeetingFinalizeOperationInProgressException) {
-                    Log.i(TAG, "Finalize operation already in progress: ${snapshot.operationId}")
+                    AppLog.i(TAG, "Finalize operation already in progress: ${snapshot.operationId}")
                     updateFinalizeProgressMessage("Vérification du compte rendu…")
                 } catch (failure: IllegalStateException) {
                     failFinalizeOperation(finalizeFailureMessage(failure.message))
                     return
                 } catch (error: IOException) {
-                    Log.w(TAG, "Finalize request lost, checking status", error)
+                    AppLog.w(TAG, "Finalize request lost, checking status", error)
+                    reportSupportIncident(
+                        route = "app://meeting/finalize",
+                        backendError = SupportReportBackendError(
+                            status = 0,
+                            code = "finalize_request_lost",
+                            message = error.message ?: "Finalize request lost",
+                            path = "/api/v1/meetings/finalize",
+                            method = "POST",
+                        ),
+                        telemetry = JSONObject().apply {
+                            put("operationId", snapshot.operationId)
+                            put("phase", "request")
+                            put("errorClass", error.javaClass.name)
+                        },
+                    )
                     updateFinalizeProgressMessage("Connexion perdue. Vérification du compte rendu…")
                 } catch (error: Throwable) {
-                    Log.w(TAG, "Finalize request failed, checking status", error)
+                    AppLog.w(TAG, "Finalize request failed, checking status", error)
+                    reportSupportIncident(
+                        route = "app://meeting/finalize",
+                        backendError = SupportReportBackendError(
+                            status = 0,
+                            code = "finalize_request_failed",
+                            message = error.message ?: "Finalize request failed",
+                            path = "/api/v1/meetings/finalize",
+                            method = "POST",
+                        ),
+                        telemetry = JSONObject().apply {
+                            put("operationId", snapshot.operationId)
+                            put("phase", "request")
+                            put("errorClass", error.javaClass.name)
+                        },
+                    )
                     updateFinalizeProgressMessage("Connexion perdue. Vérification du compte rendu…")
                 }
                 shouldPost = false
@@ -815,11 +886,40 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (sessionExpired: BackendSessionExpiredException) {
-                Log.i(TAG, "Finalize operation status session expired: ${snapshot.operationId}", sessionExpired)
+                AppLog.i(TAG, "Finalize operation status session expired: ${snapshot.operationId}", sessionExpired)
+                reportSupportIncident(
+                    route = "app://meeting/finalize/status",
+                    backendError = SupportReportBackendError(
+                        status = 401,
+                        code = "session_expired",
+                        message = sessionExpired.message ?: "Session expirée",
+                        path = "/api/v1/meetings/finalize/${snapshot.operationId}/status",
+                        method = "GET",
+                    ),
+                    telemetry = JSONObject().apply {
+                        put("operationId", snapshot.operationId)
+                        put("phase", "status")
+                    },
+                )
                 applySessionExpiredState(sessionExpired.message ?: "Session expirée")
                 return
             } catch (error: Throwable) {
-                Log.w(TAG, "Finalize status check failed", error)
+                AppLog.w(TAG, "Finalize status check failed", error)
+                reportSupportIncident(
+                    route = "app://meeting/finalize/status",
+                    backendError = SupportReportBackendError(
+                        status = 0,
+                        code = "finalize_status_check_failed",
+                        message = error.message ?: "Finalize status check failed",
+                        path = "/api/v1/meetings/finalize/${snapshot.operationId}/status",
+                        method = "GET",
+                    ),
+                    telemetry = JSONObject().apply {
+                        put("operationId", snapshot.operationId)
+                        put("phase", "status")
+                        put("errorClass", error.javaClass.name)
+                    },
+                )
                 delay(FINALIZE_OPERATION_POLL_DELAY_MS)
                 continue
             }
@@ -945,6 +1045,44 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    private fun flushPendingSupportReports() {
+        viewModelScope.launch(Dispatchers.IO) {
+            supportReporter.flushPending()
+        }
+    }
+
+    private suspend fun reportSupportIncident(
+        route: String,
+        backendError: SupportReportBackendError,
+        telemetry: JSONObject? = null,
+        originalFile: SupportReportFile = SupportReportBuilder.defaultOriginalFile("android"),
+        processedFile: SupportReportFile = SupportReportBuilder.defaultOriginalFile("android"),
+        rawFile: SupportReportFile? = null,
+        retry: SupportReportRetry = SupportReportRetry(),
+        stateSnapshot: DemeterSpeechUiState? = null,
+    ) {
+        val currentState = stateSnapshot ?: _state.value
+        val diagnosticBundle = SupportReportBuilder.buildDiagnosticBundle(
+            client = "android",
+            session = SupportReportBuilder.buildSessionSnapshot(currentState, route),
+            settings = SupportReportBuilder.buildSettingsSnapshot(prefs),
+            logs = AppLog.snapshot(),
+            telemetry = telemetry,
+        )
+        val payload = SupportReportBuilder.buildSupportReportPayload(
+            client = "android",
+            provider = "android",
+            backendError = backendError,
+            originalFile = originalFile,
+            processedFile = processedFile,
+            retry = retry,
+            diagnosticBundle = diagnosticBundle,
+            rawFile = rawFile,
+            traceId = backendError.traceId,
+        )
+        supportReporter.submit(payload)
+    }
+
     private fun cancelFinalizeJob() {
         finalizeJob?.cancel()
         finalizeJob = null
@@ -971,6 +1109,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
 
     private suspend fun transcribeRecording(file: File) {
         val snapshot = _state.value
+        val demeterEndpointPath = backend.demeterTranscriptionEndpointPath(file)
         _state.update { current ->
             current.copy(
                 review = current.review.copy(
@@ -1020,9 +1159,50 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (sessionExpired: BackendSessionExpiredException) {
-            Log.i(TAG, "Transcription session expired", sessionExpired)
+            AppLog.i(TAG, "Transcription session expired", sessionExpired)
+            reportSupportIncident(
+                route = "app://meeting/transcription",
+                backendError = SupportReportBackendError(
+                    status = 401,
+                    code = "session_expired",
+                    message = sessionExpired.message ?: "Session expirée",
+                    path = demeterEndpointPath,
+                    method = "POST",
+                ),
+                telemetry = JSONObject().apply {
+                    put("recordingPath", file.absolutePath)
+                    put("errorClass", sessionExpired.javaClass.name)
+                },
+                originalFile = SupportReportFile(
+                    name = file.name,
+                    sizeBytes = file.length(),
+                    mimeType = "audio/wav",
+                    source = "android",
+                ),
+            )
             applySessionExpiredState(sessionExpired.message ?: "Session expirée")
         } catch (error: Throwable) {
+            AppLog.w(TAG, "Transcription failed", error)
+            reportSupportIncident(
+                route = "app://meeting/transcription",
+                backendError = SupportReportBackendError(
+                    status = 0,
+                    code = "transcription_failed",
+                    message = error.message ?: "Transcription impossible",
+                    path = demeterEndpointPath,
+                    method = "POST",
+                ),
+                telemetry = JSONObject().apply {
+                    put("recordingPath", file.absolutePath)
+                    put("errorClass", error.javaClass.name)
+                },
+                originalFile = SupportReportFile(
+                    name = file.name,
+                    sizeBytes = file.length(),
+                    mimeType = "audio/wav",
+                    source = "android",
+                ),
+            )
             _state.update { current ->
                 current.copy(
                     review = current.review.copy(
@@ -1061,7 +1241,23 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                     outputDir = File(app.cacheDir, "audio-imports"),
                 )
             }.getOrElse { error ->
-                Log.w(TAG, "Audio import failed", error)
+                AppLog.w(TAG, "Audio import failed", error)
+                viewModelScope.launch(Dispatchers.IO) {
+                    reportSupportIncident(
+                        route = "app://meeting/import-audio",
+                        backendError = SupportReportBackendError(
+                            status = 0,
+                            code = "audio_import_failed",
+                            message = error.message ?: "Import audio impossible",
+                            path = "content://audio-import",
+                            method = "OPEN_DOCUMENT",
+                        ),
+                        telemetry = JSONObject().apply {
+                            put("sourceUri", uri.toString())
+                            put("errorClass", error.javaClass.name)
+                        },
+                    )
+                }
                 _state.update { current ->
                     current.copy(
                         review = current.review.copy(
