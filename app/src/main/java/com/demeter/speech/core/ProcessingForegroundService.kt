@@ -14,6 +14,7 @@ import com.demeter.speech.MainActivity
 import com.demeter.speech.R
 import com.google.gson.Gson
 import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,7 +64,8 @@ class ProcessingForegroundService : Service() {
         val audioPath = intent.getStringExtra(EXTRA_AUDIO_PATH).orEmpty()
         val audio = File(audioPath)
         val base = baseState(intent, ProcessingTaskKind.TranscriptionWithSpeakers)
-        val chunks = api.transcribeWithDemeter(audio) { status ->
+        publishState(base, persist = true)
+        val chunks = api.transcribeWithDemeter(audio, operationId = base.operationId) { status ->
             publishProgress(base, status)
         }
         val segments = chunks.flatMap { it.segments }.ifEmpty {
@@ -86,19 +88,18 @@ class ProcessingForegroundService : Service() {
         val base = baseState(intent, ProcessingTaskKind.ReportsWithSpeakers)
         val payloadFile = intent.getStringExtra(EXTRA_REPORT_PAYLOAD_PATH)?.let(::File)
         val payloadStore = ReportPayloadStore(this)
-        try {
-            val payload = payloadStore.read(requireNotNull(payloadFile) { "Compte rendu temporaire introuvable" })
-            val finalStatus = api.sendCorrectedTranscript(
-                title = payload.title,
-                rawTranscript = payload.rawTranscript,
-                editedTranscript = payload.editedTranscript,
-                segments = payload.segments,
-                detailLevels = payload.detailLevels,
-            ) { status -> publishProgress(base, status) }
-            publishReportSuccess(base, finalStatus)
-        } finally {
-            payloadStore.delete(payloadFile)
-        }
+        publishState(base, persist = true)
+        val payload = payloadStore.read(requireNotNull(payloadFile) { "Compte rendu temporaire introuvable" })
+        val finalStatus = api.sendCorrectedTranscript(
+            title = payload.title,
+            rawTranscript = payload.rawTranscript,
+            editedTranscript = payload.editedTranscript,
+            segments = payload.segments,
+            detailLevels = payload.detailLevels,
+            operationId = base.operationId,
+        ) { status -> publishProgress(base, status) }
+        payloadStore.delete(payloadFile)
+        publishReportSuccess(base, finalStatus)
     }
 
     private suspend fun runReportsFromAudio(intent: Intent) {
@@ -106,10 +107,12 @@ class ProcessingForegroundService : Service() {
         val base = baseState(intent, ProcessingTaskKind.ReportsFromAudio)
         val audioPath = intent.getStringExtra(EXTRA_AUDIO_PATH).orEmpty()
         val audio = File(audioPath)
+        publishState(base, persist = true)
         val finalStatus = api.uploadAudioForBackendReports(
             audio = audio,
             title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
             detailLevels = readDetailLevels(intent),
+            operationId = base.operationId,
         ) { status -> publishProgress(base, status) }
         if (base.audioOrigin == AudioOrigin.Imported) {
             runCatching { audio.delete() }
@@ -133,6 +136,8 @@ class ProcessingForegroundService : Service() {
         val next = base.copy(
             phase = ProcessingTaskPhase.Running,
             operation = status,
+            retryAttempt = if (status.stage == "network_retry") status.retryAttempt else 0,
+            retryMessage = if (status.stage == "network_retry") status.message else "",
             waitJoke = jokes[(status.stage.length + status.status.length + status.chunkIndex + status.chunkCount).mod(jokes.size)],
         )
         publishState(next, persist = true)
@@ -207,9 +212,13 @@ class ProcessingForegroundService : Service() {
         return ProcessingTaskState(
             kind = kind,
             phase = ProcessingTaskPhase.Running,
+            operationId = intent.getStringExtra(EXTRA_OPERATION_ID).orEmpty().ifBlank { UUID.randomUUID().toString() },
             audioPath = intent.getStringExtra(EXTRA_AUDIO_PATH).orEmpty(),
             audioDisplayName = intent.getStringExtra(EXTRA_AUDIO_DISPLAY_NAME).orEmpty(),
             audioOrigin = origin,
+            title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+            reportPayloadPath = intent.getStringExtra(EXTRA_REPORT_PAYLOAD_PATH).orEmpty(),
+            detailLevels = readDetailLevels(intent),
             waitJoke = jokes.random(),
         )
     }
@@ -241,12 +250,13 @@ class ProcessingForegroundService : Service() {
         private const val EXTRA_AUDIO_PATH = "audio_path"
         private const val EXTRA_AUDIO_DISPLAY_NAME = "audio_display_name"
         private const val EXTRA_AUDIO_ORIGIN = "audio_origin"
+        private const val EXTRA_OPERATION_ID = "operation_id"
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_REPORT_PAYLOAD_PATH = "report_payload_path"
         private const val EXTRA_DETAIL_LEVELS = "detail_levels"
 
-        fun transcribeWithSpeakersIntent(context: Context, audio: AudioAsset): Intent {
-            return baseIntent(context, ACTION_TRANSCRIBE_WITH_SPEAKERS, audio)
+        fun transcribeWithSpeakersIntent(context: Context, audio: AudioAsset, operationId: String = UUID.randomUUID().toString()): Intent {
+            return baseIntent(context, ACTION_TRANSCRIBE_WITH_SPEAKERS, audio, operationId)
         }
 
         fun reportsFromAudioIntent(
@@ -254,8 +264,9 @@ class ProcessingForegroundService : Service() {
             audio: AudioAsset,
             title: String,
             detailLevels: ReportDetailLevels,
+            operationId: String = UUID.randomUUID().toString(),
         ): Intent {
-            return baseIntent(context, ACTION_REPORTS_FROM_AUDIO, audio)
+            return baseIntent(context, ACTION_REPORTS_FROM_AUDIO, audio, operationId)
                 .putExtra(EXTRA_TITLE, title)
                 .putExtra(EXTRA_DETAIL_LEVELS, Gson().toJson(detailLevels))
         }
@@ -264,14 +275,25 @@ class ProcessingForegroundService : Service() {
             context: Context,
             audio: AudioAsset,
             payloadFile: File,
+            operationId: String = UUID.randomUUID().toString(),
         ): Intent {
-            return baseIntent(context, ACTION_REPORTS_WITH_SPEAKERS, audio)
+            return baseIntent(context, ACTION_REPORTS_WITH_SPEAKERS, audio, operationId)
                 .putExtra(EXTRA_REPORT_PAYLOAD_PATH, payloadFile.absolutePath)
         }
 
-        private fun baseIntent(context: Context, action: String, audio: AudioAsset): Intent {
+        fun resumeIntent(context: Context, task: ProcessingTaskState): Intent {
+            val audio = AudioAsset(File(task.audioPath), task.audioDisplayName.ifBlank { File(task.audioPath).name }, task.audioOrigin)
+            return when (task.kind) {
+                ProcessingTaskKind.TranscriptionWithSpeakers -> transcribeWithSpeakersIntent(context, audio, task.operationId)
+                ProcessingTaskKind.ReportsWithSpeakers -> reportsWithSpeakersIntent(context, audio, File(task.reportPayloadPath), task.operationId)
+                ProcessingTaskKind.ReportsFromAudio -> reportsFromAudioIntent(context, audio, task.title, task.detailLevels, task.operationId)
+            }
+        }
+
+        private fun baseIntent(context: Context, action: String, audio: AudioAsset, operationId: String): Intent {
             return Intent(context, ProcessingForegroundService::class.java)
                 .setAction(action)
+                .putExtra(EXTRA_OPERATION_ID, operationId)
                 .putExtra(EXTRA_AUDIO_PATH, audio.file.absolutePath)
                 .putExtra(EXTRA_AUDIO_DISPLAY_NAME, audio.displayName)
                 .putExtra(EXTRA_AUDIO_ORIGIN, audio.origin.name)
@@ -288,6 +310,7 @@ class ProcessingForegroundService : Service() {
 }
 
 private fun OperationStatus.notificationLabel(): String {
+    if (stage == "network_retry") return message.ifBlank { "Connexion perdue, nouvelle tentative..." }
     queueLabel()?.let { return it }
     uploadProgressLabel()?.let { return "Upload audio · $it" }
     transcriptionProgressLabel()?.let { return "Transcription · $it" }

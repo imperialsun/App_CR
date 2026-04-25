@@ -120,6 +120,7 @@ data class OperationStatus(
     val message: String = "",
     val lastError: String = "",
     val files: List<SentFile> = emptyList(),
+    val retryAttempt: Int = 0,
 ) {
     val isTerminal: Boolean
         get() = status == "completed" || status == "failed" || status == "cancelled"

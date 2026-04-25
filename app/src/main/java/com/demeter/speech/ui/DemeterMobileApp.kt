@@ -194,7 +194,12 @@ fun DemeterMobileApp(
                     }
                 }
             }
-            if (!state.checkingSession && state.screen != AppScreen.Auth && state.user?.email?.isNotBlank() == true) {
+            if (
+                !state.checkingSession &&
+                state.screen != AppScreen.Auth &&
+                state.screen != AppScreen.SpeakerReview &&
+                state.user?.email?.isNotBlank() == true
+            ) {
                 AccountEmailBadge(
                     email = state.user.email,
                     modifier = Modifier.align(Alignment.BottomEnd),
@@ -271,6 +276,12 @@ private fun HomeScreen(onRecord: () -> Unit, onImport: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        Image(
+            painter = painterResource(R.drawable.logo_login),
+            contentDescription = "Demeter Sante",
+            modifier = Modifier.size(112.dp),
+            contentScale = ContentScale.Fit,
+        )
         SoundWaveAnimation()
         Spacer(Modifier.height(4.dp))
         LargeChoiceButton(
@@ -1167,6 +1178,7 @@ private enum class WaitingStepState {
 }
 
 private fun transcriptionWaitTitle(operation: OperationStatus?, fallback: String): String {
+    operation?.networkRetryLabel()?.let { return it }
     operation?.queueLabel()?.let { return it }
     operation?.uploadProgressLabel()?.let { return it }
     operation?.transcriptionProgressLabel()?.let { return it }
@@ -1180,6 +1192,7 @@ private fun transcriptionWaitTitle(operation: OperationStatus?, fallback: String
 
 private fun reportWaitTitle(operation: OperationStatus?): String {
     if (operation == null) return "Traitement"
+    operation.networkRetryLabel()?.let { return it }
     operation.queueLabel()?.let { return it }
     operation.uploadProgressLabel()?.let { return it }
     operation.transcriptionProgressLabel()?.let { return it }
@@ -1189,6 +1202,10 @@ private fun reportWaitTitle(operation: OperationStatus?): String {
         stage.contains("email") -> "Envoi email"
         else -> "Traitement"
     }
+}
+
+private fun OperationStatus.networkRetryLabel(): String? {
+    return if (stage == "network_retry") message.ifBlank { "Connexion perdue, nouvelle tentative..." } else null
 }
 
 private fun OperationStatus.queueLabel(): String? {

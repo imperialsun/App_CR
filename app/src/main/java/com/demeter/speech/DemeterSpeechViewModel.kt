@@ -33,6 +33,7 @@ import com.demeter.speech.core.speakerAssignmentKey
 import java.io.FileInputStream
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -102,7 +103,10 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                         reportDetails = levels,
                     )
                     app.container.preferences.loadProcessingState()?.let { task ->
-                        if (task.phase == ProcessingTaskPhase.Running) applyProcessingTaskState(task)
+                        if (task.phase == ProcessingTaskPhase.Running) {
+                            applyProcessingTaskState(task)
+                            resumeProcessingTask(task)
+                        }
                     }
                 } else {
                     _state.value = _state.value.copy(checkingSession = false, screen = AppScreen.Auth)
@@ -275,49 +279,62 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         val current = state.value
         val audio = current.audio ?: return
         val title = generatedTitle()
+        val operationId = UUID.randomUUID().toString()
         var payloadFile: java.io.File? = null
-        runCatching {
-            val intent = if (current.wantsSpeakerAssignment == true) {
-                val assignedSegments = current.transcriptSegments.map { segment ->
-                    segment.copy(speaker = resolveSpeakerLabel(segment, current.speakerAssignments))
-                }
-                val edited = assignedSegments.joinToString("\n") { segment ->
-                    val speaker = segment.speaker.ifBlank { "Interlocuteur" }
-                    "$speaker: ${segment.text}"
-                }
-                val raw = current.transcriptChunks.joinToString("\n") { it.text }.ifBlank { edited }
-                payloadFile = reportPayloadStore.write(
-                    CorrectedReportPayload(
+        viewModelScope.launch {
+            runCatching {
+                val intent = if (current.wantsSpeakerAssignment == true) {
+                    val assignedSegments = current.transcriptSegments.map { segment ->
+                        segment.copy(speaker = resolveSpeakerLabel(segment, current.speakerAssignments))
+                    }
+                    val edited = assignedSegments.joinToString("\n") { segment ->
+                        val speaker = segment.speaker.ifBlank { "Interlocuteur" }
+                        "$speaker: ${segment.text}"
+                    }
+                    val raw = current.transcriptChunks.joinToString("\n") { it.text }.ifBlank { edited }
+                    payloadFile = reportPayloadStore.write(
+                        CorrectedReportPayload(
+                            title = title,
+                            rawTranscript = raw,
+                            editedTranscript = edited,
+                            segments = assignedSegments,
+                            detailLevels = current.reportDetails,
+                        ),
+                    )
+                    ProcessingForegroundService.reportsWithSpeakersIntent(
+                        context = context,
+                        audio = audio,
+                        payloadFile = requireNotNull(payloadFile),
+                        operationId = operationId,
+                    )
+                } else {
+                    ProcessingForegroundService.reportsFromAudioIntent(
+                        context = context,
+                        audio = audio,
                         title = title,
-                        rawTranscript = raw,
-                        editedTranscript = edited,
-                        segments = assignedSegments,
                         detailLevels = current.reportDetails,
-                    ),
-                )
-                ProcessingForegroundService.reportsWithSpeakersIntent(
-                    context = context,
-                    audio = audio,
-                    payloadFile = requireNotNull(payloadFile),
-                )
-            } else {
-                ProcessingForegroundService.reportsFromAudioIntent(
-                    context = context,
+                        operationId = operationId,
+                    )
+                }
+                persistProcessingTask(
+                    kind = if (current.wantsSpeakerAssignment == true) ProcessingTaskKind.ReportsWithSpeakers else ProcessingTaskKind.ReportsFromAudio,
+                    operationId = operationId,
                     audio = audio,
                     title = title,
+                    reportPayloadPath = payloadFile?.absolutePath.orEmpty(),
                     detailLevels = current.reportDetails,
                 )
+                _state.value = current.copy(
+                    screen = AppScreen.Processing,
+                    busy = true,
+                    error = null,
+                    waitJoke = jokes.random(),
+                )
+                ContextCompat.startForegroundService(context, intent)
+            }.onFailure { error ->
+                reportPayloadStore.delete(payloadFile)
+                _state.value = current.copy(error = error.message ?: "Génération des comptes rendus impossible", busy = false)
             }
-            _state.value = current.copy(
-                screen = AppScreen.Processing,
-                busy = true,
-                error = null,
-                waitJoke = jokes.random(),
-            )
-            ContextCompat.startForegroundService(context, intent)
-        }.onFailure { error ->
-            reportPayloadStore.delete(payloadFile)
-            _state.value = current.copy(error = error.message ?: "Génération des comptes rendus impossible", busy = false)
         }
     }
 
@@ -346,13 +363,22 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
 
     private fun startAssignedTranscription() {
         val audio = state.value.audio ?: return
+        val operationId = UUID.randomUUID().toString()
         _state.value = _state.value.copy(
             screen = AppScreen.TranscriptionWait,
             busy = true,
             waitMessage = "Transcription en attente",
             waitJoke = jokes.random(),
         )
-        ContextCompat.startForegroundService(context, ProcessingForegroundService.transcribeWithSpeakersIntent(context, audio))
+        viewModelScope.launch {
+            persistProcessingTask(
+                kind = ProcessingTaskKind.TranscriptionWithSpeakers,
+                operationId = operationId,
+                audio = audio,
+                detailLevels = state.value.reportDetails,
+            )
+            ContextCompat.startForegroundService(context, ProcessingForegroundService.transcribeWithSpeakersIntent(context, audio, operationId))
+        }
     }
 
     private fun startElapsedTicker() {
@@ -374,6 +400,46 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
             chunk.copy(segments = updated.filter { it.chunkIndex == chunk.index })
         }
         _state.value = _state.value.copy(transcriptSegments = updated, transcriptChunks = chunks)
+    }
+
+    private suspend fun persistProcessingTask(
+        kind: ProcessingTaskKind,
+        operationId: String,
+        audio: AudioAsset,
+        title: String = "",
+        reportPayloadPath: String = "",
+        detailLevels: ReportDetailLevels,
+    ) {
+        app.container.preferences.saveProcessingState(
+            ProcessingTaskState(
+                kind = kind,
+                phase = ProcessingTaskPhase.Running,
+                operationId = operationId,
+                audioPath = audio.file.absolutePath,
+                audioDisplayName = audio.displayName,
+                audioOrigin = audio.origin,
+                title = title,
+                reportPayloadPath = reportPayloadPath,
+                detailLevels = detailLevels,
+                waitJoke = jokes.random(),
+            ),
+        )
+    }
+
+    private fun resumeProcessingTask(task: ProcessingTaskState) {
+        if (task.audioPath.isBlank()) return
+        val audioFile = java.io.File(task.audioPath)
+        if (!audioFile.exists()) {
+            viewModelScope.launch { app.container.preferences.clearProcessingState() }
+            showError("Traitement interrompu: audio introuvable")
+            return
+        }
+        if (task.kind == ProcessingTaskKind.ReportsWithSpeakers && task.reportPayloadPath.isBlank()) {
+            viewModelScope.launch { app.container.preferences.clearProcessingState() }
+            showError("Traitement interrompu: données de compte rendu introuvables")
+            return
+        }
+        ContextCompat.startForegroundService(context, ProcessingForegroundService.resumeIntent(context, task))
     }
 
     private fun initialSpeakerAssignments(segments: List<TranscriptSegment>): Map<String, SpeakerAssignment> {
@@ -401,7 +467,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                     error = null,
                     audio = audio,
                     wantsSpeakerAssignment = task.kind != ProcessingTaskKind.ReportsFromAudio,
-                    waitMessage = task.operation?.stage?.ifBlank { task.operation.status }.orEmpty(),
+                    waitMessage = task.retryMessage.ifBlank { task.operation?.message?.ifBlank { task.operation.stage.ifBlank { task.operation.status } }.orEmpty() },
                     waitJoke = task.waitJoke,
                     operation = task.operation,
                 )

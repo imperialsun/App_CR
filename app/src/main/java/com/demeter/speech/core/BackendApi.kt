@@ -9,6 +9,7 @@ import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -23,15 +24,39 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import kotlin.math.min
+import kotlin.random.Random
 
-class BackendApiClient(private val preferences: AppPreferences) {
+data class RetryPolicy(
+    val maxElapsedMs: Long = 2 * 60 * 60 * 1000L,
+    val baseDelayMs: Long = 1_000L,
+    val maxDelayMs: Long = 60_000L,
+)
+
+data class RetrySignal(
+    val attempt: Int,
+    val delayMs: Long,
+    val reason: String,
+)
+
+class BackendApiClient(
+    private val preferences: AppPreferences,
+    private val networkAvailability: NetworkAvailability = AlwaysAvailableNetwork,
+    backendBaseUrl: String = BuildConfig.BACKEND_BASE_URL,
+    private val retryPolicy: RetryPolicy = RetryPolicy(),
+    private val operationPollIntervalMs: Long = DEFAULT_OPERATION_POLL_INTERVAL_MS,
+) {
     private val gson = Gson()
     private val cookieJar = PersistentCookieJar(preferences)
     private val refreshMutex = Mutex()
     private val client = OkHttpClient.Builder()
         .cookieJar(cookieJar)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .writeTimeout(90, TimeUnit.SECONDS)
         .build()
-    private val apiBaseUrl = BuildConfig.BACKEND_BASE_URL.trim().trimEnd('/').let { configured ->
+    private val apiBaseUrl = backendBaseUrl.trim().trimEnd('/').let { configured ->
         if (configured.endsWith("/api/v1")) configured else "$configured/api/v1"
     }
 
@@ -95,15 +120,17 @@ class BackendApiClient(private val preferences: AppPreferences) {
 
     suspend fun transcribeWithDemeter(
         audio: File,
+        operationId: String = UUID.randomUUID().toString(),
         onStatus: suspend (OperationStatus) -> Unit,
     ): List<TranscriptChunk> = withContext(Dispatchers.IO) {
-        val operationId = uploadAudioSlices(
+        val uploadedOperationId = uploadAudioSlices(
             audio = audio,
+            uploadId = operationId,
             endpoint = "$apiBaseUrl/providers/demeter-sante/audio/transcriptions/backend",
             formFields = emptyMap(),
             onStatus = onStatus,
         )
-        pollDemeterOperation(operationId, onStatus)
+        pollDemeterOperation(uploadedOperationId, onStatus)
     }
 
     suspend fun sendCorrectedTranscript(
@@ -112,10 +139,11 @@ class BackendApiClient(private val preferences: AppPreferences) {
         editedTranscript: String,
         segments: List<TranscriptSegment>,
         detailLevels: ReportDetailLevels,
+        operationId: String = UUID.randomUUID().toString(),
         onStatus: suspend (OperationStatus) -> Unit,
     ): OperationStatus = withContext(Dispatchers.IO) {
         val body = JsonObject().apply {
-            addProperty("operationId", UUID.randomUUID().toString())
+            addProperty("operationId", operationId)
             addProperty("meetingTitle", title)
             addProperty("rawTranscriptText", rawTranscript)
             addProperty("editedTranscriptText", editedTranscript)
@@ -138,7 +166,7 @@ class BackendApiClient(private val preferences: AppPreferences) {
             .url("$apiBaseUrl/mobile/reports/email")
             .post(body)
             .build()
-        execute(request).use { response ->
+        execute(request, onRetry = { onStatus(it.toOperationStatus(operationId)) }).use { response ->
             if (!response.isSuccessful) throw IOException("Impossible de lancer l'envoi email")
             val status = parseMobileOperation(response.body.string())
             onStatus(status)
@@ -150,10 +178,12 @@ class BackendApiClient(private val preferences: AppPreferences) {
         audio: File,
         title: String,
         detailLevels: ReportDetailLevels,
+        operationId: String = UUID.randomUUID().toString(),
         onStatus: suspend (OperationStatus) -> Unit,
     ): OperationStatus = withContext(Dispatchers.IO) {
-        val operationId = uploadAudioSlices(
+        val uploadedOperationId = uploadAudioSlices(
             audio = audio,
+            uploadId = operationId,
             endpoint = "$apiBaseUrl/mobile/audio/reports/backend",
             formFields = mapOf(
                 "meetingTitle" to title,
@@ -161,16 +191,16 @@ class BackendApiClient(private val preferences: AppPreferences) {
             ),
             onStatus = onStatus,
         )
-        pollMobileOperation(operationId, onStatus)
+        pollMobileOperation(uploadedOperationId, onStatus)
     }
 
     private suspend fun uploadAudioSlices(
         audio: File,
+        uploadId: String,
         endpoint: String,
         formFields: Map<String, String>,
         onStatus: suspend (OperationStatus) -> Unit,
     ): String {
-        val uploadId = UUID.randomUUID().toString()
         val chunkSize = 5 * 1024 * 1024
         val chunkCount = ((audio.length() + chunkSize - 1) / chunkSize).toInt().coerceAtLeast(1)
         RandomAccessFile(audio, "r").use { input ->
@@ -201,7 +231,12 @@ class BackendApiClient(private val preferences: AppPreferences) {
                     .header("X-Demeter-Upload-Final", final.toString())
                     .post(bodyBuilder.build())
                     .build()
-                execute(request).use { response ->
+                execute(
+                    request,
+                    onRetry = { signal ->
+                        onStatus(signal.toOperationStatus(uploadId, chunkIndex = index + 1, chunkCount = chunkCount))
+                    },
+                ).use { response ->
                     if (!response.isSuccessful) throw IOException("Upload audio impossible")
                     val responseBody = response.body.string()
                     if (responseBody.isNotBlank()) {
@@ -225,7 +260,7 @@ class BackendApiClient(private val preferences: AppPreferences) {
                 .url("$apiBaseUrl/providers/demeter-sante/audio/transcriptions/operations/$operationId")
                 .get()
                 .build()
-            execute(request).use { response ->
+            execute(request, onRetry = { onStatus(it.toOperationStatus(operationId)) }).use { response ->
                 if (!response.isSuccessful) throw IOException("Transcription indisponible")
                 val json = response.body.string()
                 val status = parseDemeterStatus(json)
@@ -248,7 +283,7 @@ class BackendApiClient(private val preferences: AppPreferences) {
                 .url("$apiBaseUrl/mobile/operations/$operationId")
                 .get()
                 .build()
-            execute(request).use { response ->
+            execute(request, onRetry = { onStatus(it.toOperationStatus(operationId)) }).use { response ->
                 if (!response.isSuccessful) throw IOException("Operation mobile indisponible")
                 val status = parseMobileOperation(response.body.string())
                 onStatus(status)
@@ -275,11 +310,46 @@ class BackendApiClient(private val preferences: AppPreferences) {
         }
     }
 
-    private fun executeBlocking(request: Request): okhttp3.Response {
+    private fun executeBlocking(request: Request): Response {
         return runBlocking { execute(request) }
     }
 
-    private suspend fun execute(request: Request, allowRefresh: Boolean = true): okhttp3.Response {
+    private suspend fun execute(
+        request: Request,
+        allowRefresh: Boolean = true,
+        onRetry: (suspend (RetrySignal) -> Unit)? = null,
+    ): Response {
+        val startedAt = System.currentTimeMillis()
+        var attempt = 0
+        while (true) {
+            if (!networkAvailability.awaitAvailable(retryPolicy.maxDelayMs)) {
+                attempt += 1
+                ensureRetryBudget(startedAt)
+                onRetry?.invoke(RetrySignal(attempt, retryPolicy.maxDelayMs, "Connexion perdue"))
+                continue
+            }
+            try {
+                val response = executeOnce(request, allowRefresh)
+                if (!response.isTransientFailure()) return response
+                val retryAfterMs = response.retryAfterMs()
+                val reason = "HTTP ${response.code}"
+                response.close()
+                attempt += 1
+                val delayMs = retryDelay(attempt, retryAfterMs)
+                ensureRetryBudget(startedAt, delayMs)
+                onRetry?.invoke(RetrySignal(attempt, delayMs, reason))
+                delay(delayMs)
+            } catch (error: IOException) {
+                attempt += 1
+                val delayMs = retryDelay(attempt)
+                ensureRetryBudget(startedAt, delayMs)
+                onRetry?.invoke(RetrySignal(attempt, delayMs, error.message ?: "Incident réseau"))
+                delay(delayMs)
+            }
+        }
+    }
+
+    private suspend fun executeOnce(request: Request, allowRefresh: Boolean): Response {
         val response = client.newCall(request).execute()
         if (response.code != 401 || !allowRefresh) return response
         response.close()
@@ -293,8 +363,48 @@ class BackendApiClient(private val preferences: AppPreferences) {
                 .url("$apiBaseUrl/auth/refresh")
                 .post(ByteArray(0).toRequestBody(null))
                 .build()
-            client.newCall(request).execute().use { it.isSuccessful }
+            execute(request, allowRefresh = false).use { it.isSuccessful }
         }
+    }
+
+    private fun Response.isTransientFailure(): Boolean = code in transientStatusCodes
+
+    private fun Response.retryAfterMs(): Long? {
+        val raw = header("Retry-After")?.trim() ?: return null
+        return raw.toLongOrNull()?.let { TimeUnit.SECONDS.toMillis(it) }
+    }
+
+    private fun retryDelay(attempt: Int, retryAfterMs: Long? = null): Long {
+        val exponential = retryPolicy.baseDelayMs * (1L shl min(attempt - 1, 5))
+        val capped = min(exponential, retryPolicy.maxDelayMs)
+        val jitter = Random.nextLong(0L, (capped / 4).coerceAtLeast(1L))
+        return retryAfterMs?.coerceAtMost(retryPolicy.maxDelayMs) ?: (capped + jitter).coerceAtMost(retryPolicy.maxDelayMs)
+    }
+
+    private fun ensureRetryBudget(startedAt: Long, nextDelayMs: Long = 0L) {
+        val elapsed = System.currentTimeMillis() - startedAt
+        if (elapsed + nextDelayMs > retryPolicy.maxElapsedMs) {
+            throw IOException("Incident réseau prolongé, réessayez plus tard")
+        }
+    }
+
+    private fun RetrySignal.toOperationStatus(
+        operationId: String,
+        chunkIndex: Int = 0,
+        chunkCount: Int = 0,
+    ): OperationStatus {
+        val seconds = (delayMs / 1000L).coerceAtLeast(1L)
+        return OperationStatus(
+            operationId = operationId,
+            status = "retrying",
+            stage = "network_retry",
+            progress = if (chunkCount > 0) (chunkIndex - 1).coerceAtLeast(0).toDouble() / chunkCount else 0.0,
+            chunkIndex = chunkIndex,
+            chunkCount = chunkCount,
+            message = "Connexion perdue, nouvelle tentative $attempt dans ${seconds}s",
+            lastError = reason,
+            retryAttempt = attempt,
+        )
     }
 
     private fun parseAuthUser(raw: String): AuthUser {
@@ -403,7 +513,8 @@ class BackendApiClient(private val preferences: AppPreferences) {
     }
 
     private companion object {
-        const val operationPollIntervalMs = 10_000L
+        const val DEFAULT_OPERATION_POLL_INTERVAL_MS = 10_000L
+        val transientStatusCodes = setOf(408, 429, 500, 502, 503, 504)
         val jsonMediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
     }
 }

@@ -19,10 +19,16 @@ enum class ProcessingTaskPhase {
 data class ProcessingTaskState(
     val kind: ProcessingTaskKind,
     val phase: ProcessingTaskPhase,
+    val operationId: String = "",
     val audioPath: String = "",
     val audioDisplayName: String = "",
     val audioOrigin: AudioOrigin = AudioOrigin.Imported,
+    val title: String = "",
+    val reportPayloadPath: String = "",
+    val detailLevels: ReportDetailLevels = ReportDetailLevels(),
     val operation: OperationStatus? = null,
+    val retryAttempt: Int = 0,
+    val retryMessage: String = "",
     val waitJoke: String = "",
     val chunks: List<TranscriptChunk> = emptyList(),
     val segments: List<TranscriptSegment> = emptyList(),
@@ -43,4 +49,3 @@ object ProcessingTaskEvents {
         mutableState.value = null
     }
 }
-
