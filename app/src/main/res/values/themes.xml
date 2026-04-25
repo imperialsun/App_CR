@@ -1,8 +1,13 @@
 <resources>
-    <style name="Theme.DemeterSpeech" parent="Theme.Material3.DayNight.NoActionBar" />
+    <style name="Theme.DemeterSpeech" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/demeter_background</item>
+        <item name="android:navigationBarColor">@color/demeter_background</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
 
     <style name="Theme.DemeterSpeech.Splash" parent="Theme.SplashScreen">
-        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenBackground">@color/demeter_background</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/logo_splash</item>
         <item name="postSplashScreenTheme">@style/Theme.DemeterSpeech</item>
     </style>

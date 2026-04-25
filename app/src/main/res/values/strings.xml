@@ -1,4 +1,5 @@
 <resources>
-    <string name="app_name">Demeter Santé</string>
-    <string name="recording_channel_name">Enregistrement Demeter Santé</string>
+    <string name="app_name">Demeter Sante</string>
+    <string name="recording_channel_name">Enregistrement audio</string>
+    <string name="processing_channel_name">Traitements en arrière-plan</string>
 </resources>

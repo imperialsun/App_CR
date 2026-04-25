@@ -1,1 +1,1 @@
-# Keep the default placeholder. This project ships without shrinking rules in v1.
+# Project-specific keep rules can be added here for release builds.

@@ -1,3 +1,4 @@
 <resources>
-    <color name="splash_background">#F5F6F4</color>
+    <color name="demeter_background">#F7F7F5</color>
+    <color name="demeter_text">#171717</color>
 </resources>

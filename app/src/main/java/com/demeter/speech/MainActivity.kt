@@ -1,14 +1,21 @@
 package com.demeter.speech
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.demeter.speech.ui.DemeterSpeechApp
+import com.demeter.speech.ui.DemeterMobileApp
 import com.demeter.speech.ui.DemeterSpeechTheme
 
 class MainActivity : ComponentActivity() {
@@ -20,9 +27,31 @@ class MainActivity : ComponentActivity() {
         setContent {
             DemeterSpeechTheme {
                 val state by viewModel.state.collectAsStateWithLifecycle()
-                DemeterSpeechApp(
+                val recordPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) { granted ->
+                    if (granted) viewModel.startRecording()
+                }
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) {}
+                LaunchedEffect(Unit) {
+                    if (
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+                DemeterMobileApp(
                     state = state,
-                    viewModel = viewModel,
+                    actions = viewModel,
+                    onRequireRecordingPermission = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    },
                 )
             }
         }
@@ -31,7 +60,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        viewModel.refreshSession()
+        viewModel.bootstrap()
     }
 
     override fun onStop() {
