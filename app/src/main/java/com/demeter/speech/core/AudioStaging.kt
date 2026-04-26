@@ -35,6 +35,13 @@ class AudioStaging(private val context: Context) {
         }
     }
 
+    fun clearTransientAudio() {
+        context.cacheDir
+            .listFiles { file -> file.isFile && file.name.startsWith("import-") }
+            ?.forEach { it.delete() }
+        File(context.cacheDir, "recordings").deleteRecursively()
+    }
+
     private fun displayName(uri: Uri): String {
         val projection = arrayOf(OpenableColumns.DISPLAY_NAME)
         context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->

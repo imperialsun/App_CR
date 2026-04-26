@@ -34,4 +34,8 @@ class ReportPayloadStore(
             file.delete()
         }
     }
+
+    fun clearAll() {
+        directory.listFiles()?.forEach { it.deleteRecursively() }
+    }
 }

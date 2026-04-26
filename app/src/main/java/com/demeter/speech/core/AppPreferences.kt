@@ -38,7 +38,7 @@ class AppPreferences(private val context: Context) {
         val value = context.dataStore.data.first()[processingStateKey].orEmpty()
         if (value.isBlank()) return null
         return runCatching {
-            gson.fromJson(value, ProcessingTaskState::class.java)
+            gson.fromJson(value, ProcessingTaskState::class.java).sanitizedOrNull()
         }.getOrNull()
     }
 
@@ -58,6 +58,42 @@ class AppPreferences(private val context: Context) {
         val cookieKey = stringPreferencesKey("cookies")
         val processingStateKey = stringPreferencesKey("processing_state")
     }
+}
+
+@Suppress("USELESS_ELVIS", "USELESS_CAST")
+private fun ProcessingTaskState.sanitizedOrNull(): ProcessingTaskState? {
+    val safeKind = kind ?: return null
+    val safePhase = phase ?: return null
+    return copy(
+        kind = safeKind,
+        phase = safePhase,
+        operationId = (operationId as String?).orEmpty(),
+        audioPath = (audioPath as String?).orEmpty(),
+        audioDisplayName = (audioDisplayName as String?).orEmpty(),
+        audioOrigin = audioOrigin ?: AudioOrigin.Imported,
+        title = (title as String?).orEmpty(),
+        reportPayloadPath = (reportPayloadPath as String?).orEmpty(),
+        detailLevels = detailLevels ?: ReportDetailLevels(),
+        operation = operation?.sanitized(),
+        retryMessage = (retryMessage as String?).orEmpty(),
+        waitJoke = (waitJoke as String?).orEmpty(),
+        chunks = chunks ?: emptyList(),
+        segments = segments ?: emptyList(),
+        files = files ?: emptyList(),
+        error = error as String?,
+    )
+}
+
+@Suppress("USELESS_ELVIS")
+private fun OperationStatus.sanitized(): OperationStatus {
+    return copy(
+        operationId = (operationId as String?).orEmpty(),
+        status = (status as String?).orEmpty(),
+        stage = (stage as String?).orEmpty(),
+        message = (message as String?).orEmpty(),
+        lastError = (lastError as String?).orEmpty(),
+        files = files ?: emptyList(),
+    )
 }
 
 data class StoredCookie(

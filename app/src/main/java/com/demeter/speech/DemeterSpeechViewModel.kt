@@ -93,6 +93,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         bootstrapped = true
         viewModelScope.launch {
             runCatching {
+                clearTransientWorkState()
                 val user = api.me()
                 if (user != null) {
                     val (_, levels) = api.loadReportDetailLevels()
@@ -102,12 +103,6 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                         screen = AppScreen.Home,
                         reportDetails = levels,
                     )
-                    app.container.preferences.loadProcessingState()?.let { task ->
-                        if (task.phase == ProcessingTaskPhase.Running) {
-                            applyProcessingTaskState(task)
-                            resumeProcessingTask(task)
-                        }
-                    }
                 } else {
                     _state.value = _state.value.copy(checkingSession = false, screen = AppScreen.Auth)
                 }
@@ -115,6 +110,16 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                 _state.value = _state.value.copy(checkingSession = false, screen = AppScreen.Auth)
             }
         }
+    }
+
+    private suspend fun clearTransientWorkState() {
+        elapsedJob?.cancel()
+        runCatching { context.stopService(Intent(context, ProcessingForegroundService::class.java)) }
+        runCatching { context.stopService(Intent(context, MeetingRecorderService::class.java)) }
+        ProcessingTaskEvents.clear()
+        app.container.preferences.clearProcessingState()
+        reportPayloadStore.clearAll()
+        staging.clearTransientAudio()
     }
 
     override fun updateEmail(value: String) {
@@ -147,14 +152,17 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
     override fun logout() {
         viewModelScope.launch {
             stopRecordingServiceIfNeeded()
-            api.logout()
+            runCatching { api.logout() }
+                .onFailure { showError("Déconnexion impossible") }
             _state.value = MobileUiState(checkingSession = false, screen = AppScreen.Auth)
         }
     }
 
     override fun goHome() {
         val audioToDelete = state.value.audio
+        val wasRecordingBeforeStop = state.value.recording
         val wasRecording = stopRecordingServiceIfNeeded()
+        if (wasRecordingBeforeStop && !wasRecording) return
         if (wasRecording) {
             viewModelScope.launch {
                 delay(900)
@@ -184,33 +192,43 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
     }
 
     override fun startRecording() {
-        val file = staging.newRecordingFile()
-        _state.value = _state.value.copy(
-            screen = AppScreen.Recording,
-            audio = AudioAsset(file, file.name, AudioOrigin.Recorded),
-            recording = true,
-            paused = false,
-            elapsedMs = 0L,
-            error = null,
-        )
-        ContextCompat.startForegroundService(context, MeetingRecorderService.startIntent(context, file.absolutePath))
-        startElapsedTicker()
+        runCatching {
+            val file = staging.newRecordingFile()
+            _state.value = _state.value.copy(
+                screen = AppScreen.Recording,
+                audio = AudioAsset(file, file.name, AudioOrigin.Recorded),
+                recording = true,
+                paused = false,
+                elapsedMs = 0L,
+                error = null,
+            )
+            ContextCompat.startForegroundService(context, MeetingRecorderService.startIntent(context, file.absolutePath))
+            startElapsedTicker()
+        }.onFailure { error ->
+            showError(error.message ?: "Démarrage de l'enregistrement impossible")
+        }
     }
 
     override fun pauseRecording() {
-        context.startService(MeetingRecorderService.pauseIntent(context))
-        _state.value = _state.value.copy(paused = true)
+        sendRecorderCommand(MeetingRecorderService.pauseIntent(context), "Pause impossible") {
+            _state.value = _state.value.copy(paused = true)
+        }
     }
 
     override fun resumeRecording() {
-        context.startService(MeetingRecorderService.resumeIntent(context))
-        _state.value = _state.value.copy(paused = false)
+        sendRecorderCommand(MeetingRecorderService.resumeIntent(context), "Reprise impossible") {
+            _state.value = _state.value.copy(paused = false)
+        }
     }
 
     override fun finishRecording() {
         viewModelScope.launch {
             elapsedJob?.cancel()
-            context.startService(MeetingRecorderService.stopIntent(context))
+            runCatching { context.startService(MeetingRecorderService.stopIntent(context)) }
+                .onFailure {
+                    showError(it.message ?: "Arrêt de l'enregistrement impossible")
+                    return@launch
+                }
             val stopped = withTimeoutOrNull(2500) {
                 RecordingEvents.events.filterIsInstance<RecordingEvent.Stopped>().first()
             }
@@ -363,6 +381,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
 
     private fun startAssignedTranscription() {
         val audio = state.value.audio ?: return
+        val current = state.value
         val operationId = UUID.randomUUID().toString()
         _state.value = _state.value.copy(
             screen = AppScreen.TranscriptionWait,
@@ -371,13 +390,22 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
             waitJoke = jokes.random(),
         )
         viewModelScope.launch {
-            persistProcessingTask(
-                kind = ProcessingTaskKind.TranscriptionWithSpeakers,
-                operationId = operationId,
-                audio = audio,
-                detailLevels = state.value.reportDetails,
-            )
-            ContextCompat.startForegroundService(context, ProcessingForegroundService.transcribeWithSpeakersIntent(context, audio, operationId))
+            runCatching {
+                persistProcessingTask(
+                    kind = ProcessingTaskKind.TranscriptionWithSpeakers,
+                    operationId = operationId,
+                    audio = audio,
+                    detailLevels = current.reportDetails,
+                )
+                ContextCompat.startForegroundService(context, ProcessingForegroundService.transcribeWithSpeakersIntent(context, audio, operationId))
+            }.onFailure { error ->
+                app.container.preferences.clearProcessingState()
+                _state.value = current.copy(
+                    busy = false,
+                    error = error.message ?: "Transcription impossible",
+                    wantsSpeakerAssignment = true,
+                )
+            }
         }
     }
 
@@ -434,12 +462,19 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
             showError("Traitement interrompu: audio introuvable")
             return
         }
-        if (task.kind == ProcessingTaskKind.ReportsWithSpeakers && task.reportPayloadPath.isBlank()) {
+        val payloadMissing = task.kind == ProcessingTaskKind.ReportsWithSpeakers &&
+            (task.reportPayloadPath.isBlank() || !java.io.File(task.reportPayloadPath).exists())
+        if (payloadMissing) {
             viewModelScope.launch { app.container.preferences.clearProcessingState() }
             showError("Traitement interrompu: données de compte rendu introuvables")
             return
         }
-        ContextCompat.startForegroundService(context, ProcessingForegroundService.resumeIntent(context, task))
+        runCatching {
+            ContextCompat.startForegroundService(context, ProcessingForegroundService.resumeIntent(context, task))
+        }.onFailure {
+            viewModelScope.launch { app.container.preferences.clearProcessingState() }
+            showError("Reprise du traitement impossible")
+        }
     }
 
     private fun initialSpeakerAssignments(segments: List<TranscriptSegment>): Map<String, SpeakerAssignment> {
@@ -521,10 +556,21 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
     private fun stopRecordingServiceIfNeeded(): Boolean {
         if (state.value.recording) {
             elapsedJob?.cancel()
-            context.startService(MeetingRecorderService.stopIntent(context))
-            return true
+            return runCatching {
+                context.startService(MeetingRecorderService.stopIntent(context))
+                true
+            }.getOrElse {
+                showError(it.message ?: "Arrêt de l'enregistrement impossible")
+                false
+            }
         }
         return false
+    }
+
+    private fun sendRecorderCommand(intent: Intent, fallbackError: String, onSuccess: () -> Unit) {
+        runCatching { context.startService(intent) }
+            .onSuccess { onSuccess() }
+            .onFailure { showError(it.message ?: fallbackError) }
     }
 
     private fun showError(message: String) {

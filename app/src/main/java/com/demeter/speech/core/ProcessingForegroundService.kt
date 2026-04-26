@@ -33,7 +33,14 @@ class ProcessingForegroundService : Service() {
         if (intent == null) return START_NOT_STICKY
         if (worker?.isActive == true) return START_REDELIVER_INTENT
         ensureNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Préparation", 0.0, true, ongoing = true))
+        runCatching {
+            startForeground(NOTIFICATION_ID, buildNotification("Préparation", 0.0, true, ongoing = true))
+        }.onFailure { error ->
+            val failed = failureState(intent, error.message ?: "Démarrage du traitement impossible")
+            ProcessingTaskEvents.publish(failed)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         worker = scope.launch {
             runCatching {
                 when (intent.action) {
@@ -234,7 +241,7 @@ class ProcessingForegroundService : Service() {
 
     private fun readDetailLevels(intent: Intent): ReportDetailLevels {
         val json = intent.getStringExtra(EXTRA_DETAIL_LEVELS).orEmpty()
-        return runCatching { gson.fromJson(json, ReportDetailLevels::class.java) }.getOrDefault(ReportDetailLevels())
+        return runCatching { gson.fromJson(json, ReportDetailLevels::class.java) }.getOrNull() ?: ReportDetailLevels()
     }
 
     private fun api() = (application as DemeterSpeechApplication).container.backendApiClient

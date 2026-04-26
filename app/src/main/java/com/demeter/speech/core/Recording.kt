@@ -67,7 +67,13 @@ class MeetingRecorderService : Service() {
             return
         }
         ensureNotificationChannel()
-        startForeground(NOTIFICATION_ID, recordingNotification())
+        runCatching {
+            startForeground(NOTIFICATION_ID, recordingNotification())
+        }.onFailure {
+            RecordingEvents.emit(RecordingEvent.Failed(it.message ?: "Démarrage de l'enregistrement impossible"))
+            stopSelf()
+            return
+        }
         val target = File(path)
         recorder?.stop()
         recorder = WavRecorder(target)
