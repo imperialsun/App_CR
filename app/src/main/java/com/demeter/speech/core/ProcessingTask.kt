@@ -26,6 +26,7 @@ data class ProcessingTaskState(
     val title: String = "",
     val reportPayloadPath: String = "",
     val detailLevels: ReportDetailLevels = ReportDetailLevels(),
+    val reportFormats: List<ReportFormat> = ReportFormat.entries.toList(),
     val operation: OperationStatus? = null,
     val retryAttempt: Int = 0,
     val retryMessage: String = "",

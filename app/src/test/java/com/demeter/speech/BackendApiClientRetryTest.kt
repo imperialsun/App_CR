@@ -10,6 +10,7 @@ import com.demeter.speech.core.ProcessingTaskKind
 import com.demeter.speech.core.ProcessingTaskPhase
 import com.demeter.speech.core.ProcessingTaskState
 import com.demeter.speech.core.ReportDetailLevels
+import com.demeter.speech.core.ReportFormat
 import com.demeter.speech.core.RetryPolicy
 import java.io.File
 import java.io.IOException
@@ -85,6 +86,7 @@ class BackendApiClientRetryTest {
             audio = audio,
             title = "Compte rendu",
             detailLevels = ReportDetailLevels(cri = DetailLevel.Verbose),
+            selectedFormats = listOf(ReportFormat.CRI, ReportFormat.CRN),
             operationId = "fixed-op",
             onStatus = {},
         )
@@ -108,6 +110,7 @@ class BackendApiClientRetryTest {
             audio = audio,
             title = "Compte rendu",
             detailLevels = ReportDetailLevels(),
+            selectedFormats = listOf(ReportFormat.CRI, ReportFormat.CRN),
             operationId = "poll-op",
             onStatus = {},
         )

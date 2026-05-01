@@ -103,6 +103,7 @@ class ProcessingForegroundService : Service() {
             editedTranscript = payload.editedTranscript,
             segments = payload.segments,
             detailLevels = payload.detailLevels,
+            selectedFormats = base.reportFormats,
             operationId = base.operationId,
         ) { status -> publishProgress(base, status) }
         payloadStore.delete(payloadFile)
@@ -119,6 +120,7 @@ class ProcessingForegroundService : Service() {
             audio = audio,
             title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
             detailLevels = readDetailLevels(intent),
+            selectedFormats = base.reportFormats,
             operationId = base.operationId,
         ) { status -> publishProgress(base, status) }
         if (base.audioOrigin == AudioOrigin.Imported) {
@@ -226,6 +228,7 @@ class ProcessingForegroundService : Service() {
             title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
             reportPayloadPath = intent.getStringExtra(EXTRA_REPORT_PAYLOAD_PATH).orEmpty(),
             detailLevels = readDetailLevels(intent),
+            reportFormats = readReportFormats(intent),
             waitJoke = jokes.random(),
         )
     }
@@ -242,6 +245,15 @@ class ProcessingForegroundService : Service() {
     private fun readDetailLevels(intent: Intent): ReportDetailLevels {
         val json = intent.getStringExtra(EXTRA_DETAIL_LEVELS).orEmpty()
         return runCatching { gson.fromJson(json, ReportDetailLevels::class.java) }.getOrNull() ?: ReportDetailLevels()
+    }
+
+    private fun readReportFormats(intent: Intent): List<ReportFormat> {
+        val json = intent.getStringExtra(EXTRA_REPORT_FORMATS).orEmpty()
+        if (json.isBlank()) return emptyList()
+        return runCatching {
+            val values = gson.fromJson(json, Array<String>::class.java) ?: emptyArray()
+            values.mapNotNull { raw -> runCatching { ReportFormat.valueOf(raw.trim()) }.getOrNull() }
+        }.getOrDefault(emptyList())
     }
 
     private fun api() = (application as DemeterSpeechApplication).container.backendApiClient
@@ -261,6 +273,7 @@ class ProcessingForegroundService : Service() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_REPORT_PAYLOAD_PATH = "report_payload_path"
         private const val EXTRA_DETAIL_LEVELS = "detail_levels"
+        private const val EXTRA_REPORT_FORMATS = "report_formats"
 
         fun transcribeWithSpeakersIntent(context: Context, audio: AudioAsset, operationId: String = UUID.randomUUID().toString()): Intent {
             return baseIntent(context, ACTION_TRANSCRIBE_WITH_SPEAKERS, audio, operationId)
@@ -271,29 +284,33 @@ class ProcessingForegroundService : Service() {
             audio: AudioAsset,
             title: String,
             detailLevels: ReportDetailLevels,
+            selectedFormats: List<ReportFormat>,
             operationId: String = UUID.randomUUID().toString(),
         ): Intent {
             return baseIntent(context, ACTION_REPORTS_FROM_AUDIO, audio, operationId)
                 .putExtra(EXTRA_TITLE, title)
                 .putExtra(EXTRA_DETAIL_LEVELS, Gson().toJson(detailLevels))
+                .putExtra(EXTRA_REPORT_FORMATS, Gson().toJson(selectedFormats.map { it.wire }))
         }
 
         fun reportsWithSpeakersIntent(
             context: Context,
             audio: AudioAsset,
             payloadFile: File,
+            selectedFormats: List<ReportFormat>,
             operationId: String = UUID.randomUUID().toString(),
         ): Intent {
             return baseIntent(context, ACTION_REPORTS_WITH_SPEAKERS, audio, operationId)
                 .putExtra(EXTRA_REPORT_PAYLOAD_PATH, payloadFile.absolutePath)
+                .putExtra(EXTRA_REPORT_FORMATS, Gson().toJson(selectedFormats.map { it.wire }))
         }
 
         fun resumeIntent(context: Context, task: ProcessingTaskState): Intent {
             val audio = AudioAsset(File(task.audioPath), task.audioDisplayName.ifBlank { File(task.audioPath).name }, task.audioOrigin)
             return when (task.kind) {
                 ProcessingTaskKind.TranscriptionWithSpeakers -> transcribeWithSpeakersIntent(context, audio, task.operationId)
-                ProcessingTaskKind.ReportsWithSpeakers -> reportsWithSpeakersIntent(context, audio, File(task.reportPayloadPath), task.operationId)
-                ProcessingTaskKind.ReportsFromAudio -> reportsFromAudioIntent(context, audio, task.title, task.detailLevels, task.operationId)
+                ProcessingTaskKind.ReportsWithSpeakers -> reportsWithSpeakersIntent(context, audio, File(task.reportPayloadPath), task.reportFormats, task.operationId)
+                ProcessingTaskKind.ReportsFromAudio -> reportsFromAudioIntent(context, audio, task.title, task.detailLevels, task.reportFormats, task.operationId)
             }
         }
 

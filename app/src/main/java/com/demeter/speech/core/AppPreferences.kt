@@ -74,6 +74,7 @@ private fun ProcessingTaskState.sanitizedOrNull(): ProcessingTaskState? {
         title = (title as String?).orEmpty(),
         reportPayloadPath = (reportPayloadPath as String?).orEmpty(),
         detailLevels = detailLevels ?: ReportDetailLevels(),
+        reportFormats = reportFormats ?: ReportFormat.entries.toList(),
         operation = operation?.sanitized(),
         retryMessage = (retryMessage as String?).orEmpty(),
         waitJoke = (waitJoke as String?).orEmpty(),

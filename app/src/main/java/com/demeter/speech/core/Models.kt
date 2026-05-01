@@ -32,15 +32,23 @@ enum class DetailLevel(val wire: String, val label: String) {
     }
 }
 
+fun defaultReportFormatEnabled(): Map<ReportFormat, Boolean> = ReportFormat.entries.associateWith { true }
+
+fun selectedReportFormats(values: Map<ReportFormat, Boolean>): List<ReportFormat> {
+    return ReportFormat.entries.filter { values[it] == true }
+}
+
 data class ReportDetailLevels(
     val cri: DetailLevel = DetailLevel.Standard,
     val cro: DetailLevel = DetailLevel.Standard,
     val crs: DetailLevel = DetailLevel.Standard,
+    val crn: DetailLevel = DetailLevel.Standard,
 ) {
     fun toWireMap(): Map<String, String> = mapOf(
         "CRI" to cri.wire,
         "CRO" to cro.wire,
         "CRS" to crs.wire,
+        "CRN" to crn.wire,
     )
 
     fun update(format: ReportFormat, level: DetailLevel): ReportDetailLevels {
@@ -48,7 +56,17 @@ data class ReportDetailLevels(
             ReportFormat.CRI -> copy(cri = level)
             ReportFormat.CRO -> copy(cro = level)
             ReportFormat.CRS -> copy(crs = level)
+            ReportFormat.CRN -> copy(crn = level)
         }
+    }
+}
+
+fun ReportDetailLevels.levelFor(format: ReportFormat): DetailLevel {
+    return when (format) {
+        ReportFormat.CRI -> cri
+        ReportFormat.CRO -> cro
+        ReportFormat.CRS -> crs
+        ReportFormat.CRN -> crn
     }
 }
 
@@ -56,6 +74,7 @@ enum class ReportFormat(val wire: String, val title: String) {
     CRI("CRI", "CR Détaillé"),
     CRO("CRO", "CR Opérationnel"),
     CRS("CRS", "CR Synthétique"),
+    CRN("CRN", "CR Narratif"),
 }
 
 data class AudioAsset(
@@ -145,6 +164,7 @@ data class MobileUiState(
     val paused: Boolean = false,
     val elapsedMs: Long = 0L,
     val wantsSpeakerAssignment: Boolean? = null,
+    val reportFormatsEnabled: Map<ReportFormat, Boolean> = defaultReportFormatEnabled(),
     val waitMessage: String = "",
     val waitJoke: String = "",
     val transcriptChunks: List<TranscriptChunk> = emptyList(),

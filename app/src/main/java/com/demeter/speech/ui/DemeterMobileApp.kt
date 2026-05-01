@@ -67,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -95,6 +96,8 @@ import com.demeter.speech.core.DetailLevel
 import com.demeter.speech.core.MobileUiState
 import com.demeter.speech.core.OperationStatus
 import com.demeter.speech.core.ReportFormat
+import com.demeter.speech.core.levelFor
+import com.demeter.speech.core.selectedReportFormats
 import com.demeter.speech.core.SpeakerAssignment
 import com.demeter.speech.core.TranscriptChunk
 import com.demeter.speech.core.TranscriptSegment
@@ -198,6 +201,7 @@ fun DemeterMobileApp(
                 !state.checkingSession &&
                 state.screen != AppScreen.Auth &&
                 state.screen != AppScreen.SpeakerReview &&
+                state.screen != AppScreen.ReportSettings &&
                 state.user?.email?.isNotBlank() == true
             ) {
                 AccountEmailBadge(
@@ -993,21 +997,58 @@ private fun formatClockMs(ms: Int): String {
 
 @Composable
 private fun ReportSettingsScreen(state: MobileUiState, actions: MobileActions) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        Text("Réglages des comptes rendus", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-        DetailRow(ReportFormat.CRI.title, state.reportDetails.cri) { actions.updateDetailLevel(ReportFormat.CRI, it) }
-        DetailRow(ReportFormat.CRO.title, state.reportDetails.cro) { actions.updateDetailLevel(ReportFormat.CRO, it) }
-        DetailRow(ReportFormat.CRS.title, state.reportDetails.crs) { actions.updateDetailLevel(ReportFormat.CRS, it) }
-        Spacer(Modifier.height(8.dp))
-        PrimaryActionButton("Générer les comptes rendus", enabled = !state.busy, onClick = actions::generateReports)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        item {
+            Text("Réglages des comptes rendus", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+        }
+        item {
+            Text("Activez les formats que vous voulez générer, puis ajustez leur niveau de détail.", fontSize = 13.sp, color = Color(0xFF6B7280))
+        }
+        items(ReportFormat.entries.toList()) { format ->
+            val enabled = state.reportFormatsEnabled[format] == true
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(format.title, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (enabled) "Format activé" else "Format désactivé",
+                            fontSize = 12.sp,
+                            color = Color(0xFF6B7280),
+                        )
+                    }
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = { actions.updateReportFormatEnabled(format, it) },
+                    )
+                }
+                if (enabled) {
+                    DetailRow(state.reportDetails.levelFor(format)) { actions.updateDetailLevel(format, it) }
+                }
+            }
+        }
+        item {
+            Spacer(Modifier.height(8.dp))
+            PrimaryActionButton(
+                "Générer les comptes rendus",
+                enabled = !state.busy && selectedReportFormats(state.reportFormatsEnabled).isNotEmpty(),
+                onClick = actions::generateReports,
+            )
+        }
     }
 }
 
 @Composable
-private fun DetailRow(title: String, selected: DetailLevel, onSelected: (DetailLevel) -> Unit) {
+private fun DetailRow(selected: DetailLevel, onSelected: (DetailLevel) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(title, fontWeight = FontWeight.SemiBold)
+            Text("Niveau de détail", fontWeight = FontWeight.SemiBold)
             Text(selected.label, color = Color(0xFF4B5563))
         }
         Slider(

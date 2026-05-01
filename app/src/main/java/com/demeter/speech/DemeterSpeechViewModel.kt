@@ -25,6 +25,7 @@ import com.demeter.speech.core.RecordingEvents
 import com.demeter.speech.core.ReportDetailLevels
 import com.demeter.speech.core.ReportFormat
 import com.demeter.speech.core.ReportPayloadStore
+import com.demeter.speech.core.selectedReportFormats
 import com.demeter.speech.core.SpeakerAssignment
 import com.demeter.speech.core.TranscriptChunk
 import com.demeter.speech.core.TranscriptSegment
@@ -62,6 +63,7 @@ interface MobileActions {
     fun updateSegmentSpeaker(id: String, value: String)
     fun applySpeakerAssignments(assignments: Map<String, SpeakerAssignment>)
     fun goToReportSettings()
+    fun updateReportFormatEnabled(format: ReportFormat, enabled: Boolean)
     fun updateDetailLevel(format: ReportFormat, level: DetailLevel)
     fun generateReports()
     fun saveAudioTo(uri: Uri)
@@ -283,6 +285,14 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         _state.value = _state.value.copy(screen = AppScreen.ReportSettings, error = null)
     }
 
+    override fun updateReportFormatEnabled(format: ReportFormat, enabled: Boolean) {
+        val current = state.value.reportFormatsEnabled
+        if (current[format] == enabled) return
+        _state.value = _state.value.copy(
+            reportFormatsEnabled = current + (format to enabled),
+        )
+    }
+
     override fun updateDetailLevel(format: ReportFormat, level: DetailLevel) {
         val levels = state.value.reportDetails.update(format, level)
         if (levels == state.value.reportDetails) return
@@ -298,6 +308,11 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         val audio = current.audio ?: return
         val title = generatedTitle()
         val operationId = UUID.randomUUID().toString()
+        val selectedFormats = selectedReportFormats(current.reportFormatsEnabled)
+        if (selectedFormats.isEmpty()) {
+            showError("Sélectionnez au moins un format de compte rendu")
+            return
+        }
         var payloadFile: java.io.File? = null
         viewModelScope.launch {
             runCatching {
@@ -323,6 +338,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                         context = context,
                         audio = audio,
                         payloadFile = requireNotNull(payloadFile),
+                        selectedFormats = selectedFormats,
                         operationId = operationId,
                     )
                 } else {
@@ -331,6 +347,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                         audio = audio,
                         title = title,
                         detailLevels = current.reportDetails,
+                        selectedFormats = selectedFormats,
                         operationId = operationId,
                     )
                 }
@@ -341,6 +358,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                     title = title,
                     reportPayloadPath = payloadFile?.absolutePath.orEmpty(),
                     detailLevels = current.reportDetails,
+                    reportFormats = selectedFormats,
                 )
                 _state.value = current.copy(
                     screen = AppScreen.Processing,
@@ -396,6 +414,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                     operationId = operationId,
                     audio = audio,
                     detailLevels = current.reportDetails,
+                    reportFormats = selectedReportFormats(current.reportFormatsEnabled),
                 )
                 ContextCompat.startForegroundService(context, ProcessingForegroundService.transcribeWithSpeakersIntent(context, audio, operationId))
             }.onFailure { error ->
@@ -437,6 +456,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
         title: String = "",
         reportPayloadPath: String = "",
         detailLevels: ReportDetailLevels,
+        reportFormats: List<ReportFormat>,
     ) {
         app.container.preferences.saveProcessingState(
             ProcessingTaskState(
@@ -449,6 +469,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                 title = title,
                 reportPayloadPath = reportPayloadPath,
                 detailLevels = detailLevels,
+                reportFormats = reportFormats,
                 waitJoke = jokes.random(),
             ),
         )
@@ -502,6 +523,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                     error = null,
                     audio = audio,
                     wantsSpeakerAssignment = task.kind != ProcessingTaskKind.ReportsFromAudio,
+                    reportFormatsEnabled = task.reportFormats.associateWith { true },
                     waitMessage = task.retryMessage.ifBlank { task.operation?.message?.ifBlank { task.operation.stage.ifBlank { task.operation.status } }.orEmpty() },
                     waitJoke = task.waitJoke,
                     operation = task.operation,
@@ -526,6 +548,7 @@ class DemeterSpeechViewModel(application: Application) : AndroidViewModel(applic
                         screen = AppScreen.Success,
                         busy = false,
                         audio = audio,
+                        reportFormatsEnabled = task.reportFormats.associateWith { true },
                         operation = task.operation,
                         successFiles = task.files,
                         successCanSaveAudio = task.successCanSaveAudio,

@@ -139,14 +139,19 @@ class BackendApiClient(
         editedTranscript: String,
         segments: List<TranscriptSegment>,
         detailLevels: ReportDetailLevels,
+        selectedFormats: List<ReportFormat>,
         operationId: String = UUID.randomUUID().toString(),
         onStatus: suspend (OperationStatus) -> Unit,
     ): OperationStatus = withContext(Dispatchers.IO) {
+        if (selectedFormats.isEmpty()) {
+            throw IOException("Aucun format de compte rendu sélectionné")
+        }
         val body = JsonObject().apply {
             addProperty("operationId", operationId)
             addProperty("meetingTitle", title)
             addProperty("rawTranscriptText", rawTranscript)
             addProperty("editedTranscriptText", editedTranscript)
+            add("selectedFormats", JsonParser.parseString(reportFormatsWireJson(selectedFormats)))
             add("reportDetailLevels", JsonObject().apply {
                 detailLevels.toWireMap().forEach { (format, level) -> addProperty(format, level) }
             })
@@ -178,15 +183,20 @@ class BackendApiClient(
         audio: File,
         title: String,
         detailLevels: ReportDetailLevels,
+        selectedFormats: List<ReportFormat>,
         operationId: String = UUID.randomUUID().toString(),
         onStatus: suspend (OperationStatus) -> Unit,
     ): OperationStatus = withContext(Dispatchers.IO) {
+        if (selectedFormats.isEmpty()) {
+            throw IOException("Aucun format de compte rendu sélectionné")
+        }
         val uploadedOperationId = uploadAudioSlices(
             audio = audio,
             uploadId = operationId,
             endpoint = "$apiBaseUrl/mobile/audio/reports/backend",
             formFields = mapOf(
                 "meetingTitle" to title,
+                "selectedFormats" to reportFormatsWireJson(selectedFormats),
                 "reportDetailLevels" to gson.toJson(detailLevels.toWireMap()),
             ),
             onStatus = onStatus,
@@ -419,7 +429,12 @@ class BackendApiClient(
             cri = DetailLevel.fromWire(levels.get("CRI")?.asString ?: levels.get("cri")?.asString),
             cro = DetailLevel.fromWire(levels.get("CRO")?.asString ?: levels.get("cro")?.asString),
             crs = DetailLevel.fromWire(levels.get("CRS")?.asString ?: levels.get("crs")?.asString),
+            crn = DetailLevel.fromWire(levels.get("CRN")?.asString ?: levels.get("crn")?.asString),
         )
+    }
+
+    private fun reportFormatsWireJson(formats: List<ReportFormat>): String {
+        return gson.toJson(formats.map { it.wire })
     }
 
     private fun parseAnyOperation(raw: String, fallbackId: String, chunkIndex: Int, chunkCount: Int): OperationStatus {
